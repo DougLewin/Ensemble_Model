@@ -20,74 +20,62 @@ from portfolio_manager import PortfolioManager, PortfolioConfig
 from backtest_engine import BacktestEngine
 
 
-def generate_mock_market_data(num_tickers: int = 10, 
-                              num_days: int = 500,
-                              seed: int = 42) -> pd.DataFrame:
+def load_live_market_data(filepath: str = "NASDAQ_HISTORY_2.csv") -> pd.DataFrame:
     """
-    Generate synthetic market data for testing.
+    Load live market data from CSV file.
     
     Args:
-        num_tickers: Number of assets to simulate
-        num_days: Number of trading days
-        seed: Random seed for reproducibility
+        filepath: Path to the CSV file
     
     Returns:
         DataFrame with MultiIndex (date, ticker) and OHLCV columns
     """
-    np.random.seed(seed)
-    
     print(f"\n{'='*60}")
-    print("DATA GENERATION: Creating Mock Market Data")
+    print("DATA LOADING: Reading Live Market Data")
     print(f"{'='*60}")
-    print(f"Tickers: {num_tickers} | Days: {num_days}")
+    print(f"Source: {filepath}")
     
-    # Generate date range
-    dates = pd.date_range(start='2023-01-01', periods=num_days, freq='D')
-    tickers = [f'ASSET_{i:02d}' for i in range(1, num_tickers + 1)]
-    
-    # Create MultiIndex
-    index = pd.MultiIndex.from_product([dates, tickers], 
-                                       names=['date', 'ticker'])
-    
-    # Generate price data with different characteristics
-    data = []
-    for ticker in tickers:
-        # Each asset has unique drift and volatility
-        drift = np.random.uniform(-0.0002, 0.0005, 1)[0]
-        volatility = np.random.uniform(0.01, 0.03, 1)[0]
+    try:
+        # Load CSV
+        df = pd.read_csv(filepath)
         
-        # Generate returns using GBM (Geometric Brownian Motion)
-        returns = np.random.normal(drift, volatility, num_days)
+        # Standardize column names (lowercase)
+        df.columns = df.columns.str.lower()
         
-        # Add mean reversion component (AR(1) process)
-        ar_coef = np.random.uniform(0.3, 0.7, 1)[0]
-        for i in range(1, len(returns)):
-            returns[i] += -ar_coef * returns[i-1]
+        # Rename columns to match expected format
+        column_mapping = {
+            'code': 'ticker',
+            'date': 'date',
+            'open': 'open',
+            'high': 'high',
+            'low': 'low',
+            'close': 'close',
+            'volume': 'volume'
+        }
+        df = df.rename(columns=column_mapping)
         
-        # Convert to prices
-        initial_price = np.random.uniform(50, 200, 1)[0]
-        prices = initial_price * np.exp(np.cumsum(returns))
+        # Convert date to datetime (YYYY-MM-DD format)
+        df['date'] = pd.to_datetime(df['date'])
         
-        # Generate OHLCV
-        for i, (date, price) in enumerate(zip(dates, prices)):
-            daily_vol = volatility * price
-            data.append({
-                'date': date,
-                'ticker': ticker,
-                'open': price + np.random.normal(0, daily_vol * 0.5),
-                'high': price + abs(np.random.normal(0, daily_vol)),
-                'low': price - abs(np.random.normal(0, daily_vol)),
-                'close': price,
-                'volume': int(np.random.uniform(1e6, 1e7))
-            })
-    
-    df = pd.DataFrame(data)
-    df = df.set_index(['date', 'ticker'])
-    
-    print(f"✓ Generated {len(df)} data points")
-    print(f"  Date Range: {dates[0].date()} to {dates[-1].date()}")
-    
-    return df
+        # Keep only required columns
+        required_cols = ['date', 'ticker', 'open', 'high', 'low', 'close', 'volume']
+        df = df[required_cols]
+        
+        # Set MultiIndex
+        df = df.set_index(['date', 'ticker'])
+        
+        # Sort index
+        df = df.sort_index()
+        
+        print(f"✓ Loaded {len(df)} data points")
+        print(f"  Date Range: {df.index.get_level_values('date').min().date()} to {df.index.get_level_values('date').max().date()}")
+        print(f"  Tickers: {', '.join(df.index.get_level_values('ticker').unique())}")
+        
+        return df
+        
+    except Exception as e:
+        print(f"❌ Error loading data: {str(e)}")
+        raise
 
 
 def main():
@@ -100,13 +88,9 @@ def main():
     print("="*60)
     
     # ============================================================
-    # STEP 1: Generate Market Data
+    # 1. Load Live Market Data
     # ============================================================
-    market_data = generate_mock_market_data(
-        num_tickers=15,
-        num_days=500,
-        seed=42
-    )
+    market_data = load_live_market_data(filepath="NASDAQ_HISTORY_2.csv")
     
     # ============================================================
     # STEP 2: Initialize Strategies

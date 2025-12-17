@@ -1,27 +1,25 @@
 """
-Streamlit Trading Dashboard - Interactive Research Lab
-=======================================================
-Full-stack quantitative dashboard for ensemble trading strategies.
+Streamlit Trading Dashboard - Multi-Page Navigation
+====================================================
+Interactive dashboard for ensemble trading strategies with organized navigation.
 
-Author: Full-Stack Quantitative Developer
-Date: December 16, 2025
+Author: Full-Stack Quantitative Developer  
+Date: December 18, 2025
 """
 
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
-import plotly.express as px
-from datetime import datetime
 import warnings
+import os
+import glob
 warnings.filterwarnings('ignore')
 
 # Import our trading engine components
 from strategy_base import Strategy
 from mean_reversion_strategy import MeanReversionQP
 from trend_strategy import SimpleTrend
-from portfolio_manager import PortfolioManager, PortfolioConfig
-from backtest_engine import BacktestEngine
+from momentum_strategy import MomentumStrategy
 
 # ============================================================
 # PAGE CONFIGURATION
@@ -33,6 +31,39 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# ============================================================
+# SESSION STATE INITIALIZATION
+# ============================================================
+
+if 'current_page' not in st.session_state:
+    st.session_state.current_page = 'Home'
+
+if 'current_model' not in st.session_state:
+    st.session_state.current_model = None
+
+if 'data_source' not in st.session_state:
+    st.session_state.data_source = 'NASDAQ.csv'
+
+if 'date_filter_enabled' not in st.session_state:
+    st.session_state.date_filter_enabled = False
+
+if 'ticker_filter' not in st.session_state:
+    st.session_state.ticker_filter = None
+
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
+
+def get_available_csv_files():
+    """Get list of CSV files in current directory."""
+    csv_files = []
+    # Match .csv files and files with .csv. pattern
+    for pattern in ['*.csv', '*.csv.*']:
+        csv_files.extend(glob.glob(pattern))
+    # Remove duplicates and sort
+    csv_files = sorted(list(set(csv_files)))
+    return csv_files if csv_files else ['NASDAQ.csv']  # Default if none found
 
 # ============================================================
 # DATA LOADING (WITH CACHING)
@@ -56,11 +87,10 @@ def load_nasdaq_data(filepath: str = "NASDAQ.csv") -> pd.DataFrame:
         # Standardize column names (lowercase)
         df.columns = df.columns.str.lower()
         
-        # Rename columns if needed
+        # Rename columns to match expected format
         column_mapping = {
+            'code': 'ticker',
             'date': 'date',
-            'ticker': 'ticker',
-            'symbol': 'ticker',
             'open': 'open',
             'high': 'high',
             'low': 'low',
@@ -69,8 +99,12 @@ def load_nasdaq_data(filepath: str = "NASDAQ.csv") -> pd.DataFrame:
         }
         df = df.rename(columns=column_mapping)
         
-        # Convert date to datetime
+        # Convert date to datetime (YYYY-MM-DD format)
         df['date'] = pd.to_datetime(df['date'])
+        
+        # Keep only required columns
+        required_cols = ['date', 'ticker', 'open', 'high', 'low', 'close', 'volume']
+        df = df[required_cols]
         
         # Set MultiIndex
         df = df.set_index(['date', 'ticker'])
@@ -82,593 +116,519 @@ def load_nasdaq_data(filepath: str = "NASDAQ.csv") -> pd.DataFrame:
         
     except FileNotFoundError:
         st.error(f"❌ File not found: {filepath}")
-        st.info("📁 Please ensure NASDAQ.csv is in the current directory.")
-        
-        # Generate synthetic data as fallback
-        st.warning("⚠️ Using synthetic data for demonstration...")
-        return generate_fallback_data()
+        st.info("📁 Please ensure {filepath} is in the current directory.")
+        return None
     
     except Exception as e:
         st.error(f"❌ Error loading data: {str(e)}")
-        return generate_fallback_data()
+        return None
 
+# ============================================================
+# MODEL METADATA
+# ============================================================
 
-def generate_fallback_data() -> pd.DataFrame:
-    """Generate synthetic data if NASDAQ.csv is not available."""
-    np.random.seed(42)
-    
-    dates = pd.date_range(start='2023-01-01', periods=500, freq='D')
-    tickers = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'JPM', 'V', 'WMT']
-    
-    data = []
-    for ticker in tickers:
-        drift = np.random.uniform(-0.0002, 0.0005)
-        volatility = np.random.uniform(0.015, 0.03)
+MODEL_INFO = {
+    "Mean Reversion": {
+        "class": MeanReversionQP,
+        "short_desc": "Buys undervalued assets when price deviates below historical mean, assuming reversion to equilibrium.",
+        "description": """
+        **Mean Reversion (Quality-Price Indicator)**
         
-        returns = np.random.normal(drift, volatility, len(dates))
-        initial_price = np.random.uniform(100, 300)
-        prices = initial_price * np.exp(np.cumsum(returns))
+        This strategy identifies undervalued assets by calculating a Quality-Price Indicator (QPI) 
+        that measures how far current prices deviate from their historical average relative to volatility.
         
-        for date, price in zip(dates, prices):
-            daily_vol = volatility * price
-            data.append({
-                'date': date,
-                'ticker': ticker,
-                'open': price + np.random.normal(0, daily_vol * 0.5),
-                'high': price + abs(np.random.normal(0, daily_vol)),
-                'low': price - abs(np.random.normal(0, daily_vol)),
-                'close': price,
-                'volume': int(np.random.uniform(1e6, 1e7))
-            })
-    
-    df = pd.DataFrame(data)
-    df = df.set_index(['date', 'ticker'])
-    
-    return df
-
-
-# ============================================================
-# HELPER CLASSES
-# ============================================================
-
-class RandomStrategy(Strategy):
-    """
-    Random Strategy (Benchmark/Placeholder).
-    Generates random signals for comparison.
-    """
-    
-    def __init__(self, name: str = "Random", seed: int = 42):
-        super().__init__(name)
-        self.seed = seed
-    
-    def generate_signals(self, data: pd.DataFrame) -> pd.DataFrame:
-        np.random.seed(self.seed)
-        df = data.copy()
+        **Core Logic:**
+        - Calculates moving average and volatility over lookback periods
+        - Computes QPI = (Price - MA) / Historical Volatility
+        - Generates buy signals when QPI is low (price below mean)
+        - Assumes prices will revert to the mean over time
         
-        # Generate random signals
-        df['signal'] = np.random.uniform(-1, 1, len(df))
-        df['confidence'] = np.random.uniform(0.3, 0.7, len(df))
+        **Best Use Cases:**
+        - Range-bound markets with clear support/resistance
+        - Assets with stable fundamental values
+        - Markets with cyclical behavior
+        """,
+        "assumptions": [
+            "Asset prices oscillate around a stable mean",
+            "Volatility is relatively constant over time",
+            "No structural breaks or regime changes",
+            "Sufficient liquidity for mean reversion to occur"
+        ],
+        "hyperparameters": {
+            "lookback_ma": {
+                "name": "MA Lookback Period",
+                "description": "Number of periods to calculate moving average",
+                "default": 50,
+                "range": (20, 200),
+                "impact": "Shorter = more responsive to price changes, Longer = smoother trend"
+            },
+            "lookback_vol": {
+                "name": "Volatility Lookback Period",
+                "description": "Number of periods to calculate volatility",
+                "default": 20,
+                "range": (10, 60),
+                "impact": "Affects sensitivity to price deviations"
+            },
+            "historical_vol_period": {
+                "name": "Historical Volatility Period",
+                "description": "Extended period for calculating baseline volatility",
+                "default": 100,
+                "range": (50, 500),
+                "impact": "Longer period = more stable volatility estimates"
+            }
+        }
+    },
+    
+    "Trend Following": {
+        "class": SimpleTrend,
+        "short_desc": "Follows momentum by comparing price to moving average, buying when price is above trend.",
+        "description": """
+        **Simple Trend Following Strategy**
         
-        return df[['signal', 'confidence']]
+        This strategy captures momentum by identifying assets trading above their moving average,
+        indicating an established uptrend.
+        
+        **Core Logic:**
+        - Calculates Simple Moving Average (SMA) over specified period
+        - Compares current price to SMA
+        - Generates buy signals when price > SMA (uptrend)
+        - Signal strength based on distance from SMA
+        
+        **Best Use Cases:**
+        - Trending markets with clear directional moves
+        - Breakout scenarios
+        - Momentum-driven assets (tech stocks, growth sectors)
+        """,
+        "assumptions": [
+            "Trends persist over time (momentum effect)",
+            "Price above MA indicates continued upward movement",
+            "Market exhibits trending behavior vs. mean reversion",
+            "Transaction costs don't erode trend profits"
+        ],
+        "hyperparameters": {
+            "sma_period": {
+                "name": "SMA Period",
+                "description": "Number of periods for moving average calculation",
+                "default": 100,
+                "range": (20, 200),
+                "impact": "Shorter = captures short-term trends, Longer = focuses on major trends"
+            }
+        }
+    },
     
-    def __repr__(self) -> str:
-        return f"RandomStrategy(name='{self.name}')"
-
-
-# ============================================================
-# DASHBOARD HEADER
-# ============================================================
-
-st.title("📊 Ensemble Trading Research Lab")
-st.markdown("""
-Interactive dashboard for testing and analyzing ensemble trading strategies.
-Select strategies, configure parameters, and visualize performance in real-time.
-""")
-
-# ============================================================
-# SIDEBAR - CONTROL PANEL
-# ============================================================
-
-st.sidebar.title("⚙️ Control Panel")
-st.sidebar.markdown("---")
-
-# Load data
-st.sidebar.subheader("📁 Data Source")
-data_file = st.sidebar.text_input("CSV Filename", value="NASDAQ.csv")
-
-with st.spinner("Loading market data..."):
-    market_data = load_nasdaq_data(data_file)
-
-if market_data is not None and len(market_data) > 0:
-    # Display data info
-    num_tickers = len(market_data.index.get_level_values('ticker').unique())
-    date_range = market_data.index.get_level_values('date').unique()
-    start_date = date_range.min()
-    end_date = date_range.max()
-    
-    st.sidebar.success("✅ Data Loaded")
-    st.sidebar.metric("Tickers", num_tickers)
-    st.sidebar.metric("Date Range", f"{start_date.date()} to {end_date.date()}")
-    st.sidebar.metric("Total Records", f"{len(market_data):,}")
-else:
-    st.sidebar.error("❌ No data available")
-    st.stop()
-
-st.sidebar.markdown("---")
-
-# ============================================================
-# STRATEGY SELECTION
-# ============================================================
-
-st.sidebar.subheader("🎯 Ensemble Composition")
-
-available_strategies = {
-    "Mean Reversion (QP)": "mean_reversion",
-    "Trend Following": "trend",
-    "Random (Benchmark)": "random"
+    "Momentum": {
+        "class": MomentumStrategy,
+        "short_desc": "Ranks assets by recent price performance, buying strongest performers expecting continuation.",
+        "description": """
+        **Momentum Strategy (Rate of Change)**
+        
+        This strategy selects assets with the strongest recent price performance,
+        based on the principle that past winners tend to continue winning.
+        
+        **Core Logic:**
+        - Calculates rate of change over lookback period
+        - Ranks assets by momentum score
+        - Generates signals favoring top performers
+        - Continuous rebalancing to maintain momentum exposure
+        
+        **Best Use Cases:**
+        - Bull markets with clear sector leaders
+        - Growth-oriented portfolios
+        - High-volatility environments with persistent trends
+        """,
+        "assumptions": [
+            "Past performance predicts future performance (short-term)",
+            "Winner momentum persists for the holding period",
+            "Market rewards risk-taking in uptrends",
+            "Sufficient liquidity to enter/exit positions"
+        ],
+        "hyperparameters": {
+            "lookback_period": {
+                "name": "Momentum Lookback Period",
+                "description": "Number of periods to calculate momentum",
+                "default": 20,
+                "range": (5, 60),
+                "impact": "Shorter = more reactive to recent changes, Longer = more stable signals"
+            }
+        }
+    }
 }
 
-selected_strategies = st.sidebar.multiselect(
-    "Select Strategies",
-    options=list(available_strategies.keys()),
-    default=["Mean Reversion (QP)", "Trend Following"],
-    help="Choose which strategies to include in the ensemble"
+# ============================================================
+# SIDEBAR NAVIGATION
+# ============================================================
+
+st.sidebar.title("📊 Navigation")
+
+# Data Source Selector
+st.sidebar.markdown("---")
+st.sidebar.subheader("📁 Data Source")
+
+available_csv_files = get_available_csv_files()
+current_source = st.session_state.data_source
+
+# Ensure current source is in the list
+if current_source not in available_csv_files:
+    available_csv_files.append(current_source)
+    available_csv_files = sorted(available_csv_files)
+
+selected_csv = st.sidebar.selectbox(
+    "Select CSV file:",
+    options=available_csv_files,
+    index=available_csv_files.index(current_source) if current_source in available_csv_files else 0,
+    help="Choose the data file to use for analysis",
+    key="csv_selector"
 )
 
-if len(selected_strategies) == 0:
-    st.warning("⚠️ Please select at least one strategy from the sidebar.")
-    st.stop()
+# Update session state if changed
+if selected_csv != st.session_state.data_source:
+    st.session_state.data_source = selected_csv
+    # Clear cache to reload data
+    load_nasdaq_data.clear()
+    st.rerun()
 
 st.sidebar.markdown("---")
 
-# ============================================================
-# PARAMETERS
-# ============================================================
-
-st.sidebar.subheader("📐 Parameters")
-
-# Portfolio parameters
-top_n_assets = st.sidebar.slider(
-    "Max Positions",
-    min_value=3,
-    max_value=min(20, num_tickers),
-    value=5,
-    help="Maximum number of assets to hold simultaneously"
+# Main navigation
+page = st.sidebar.radio(
+    "Go to:",
+    ["🏠 Home", "💾 Data", "🧠 Models", "🚀 Run Simulation", "📊 Data Explorer"],
+    key="main_nav"
 )
 
-# Strategy-specific parameters
-with st.sidebar.expander("Mean Reversion Settings", expanded=False):
-    mr_lookback_ma = st.slider("MA Lookback", 20, 200, 50)
-    mr_lookback_vol = st.slider("Volatility Lookback", 10, 60, 20)
-    mr_hist_vol = st.slider("Historical Vol Period", 50, 500, 100)
+# Update session state
+if page == "🏠 Home":
+    st.session_state.current_page = "Home"
+elif page == "💾 Data":
+    st.session_state.current_page = "Data"
+elif page == "🧠 Models":
+    st.session_state.current_page = "Models"
+elif page == "🚀 Run Simulation":
+    st.session_state.current_page = "Run Simulation"
+elif page == "📊 Data Explorer":
+    st.session_state.current_page = "Data Explorer"
 
-with st.sidebar.expander("Trend Following Settings", expanded=False):
-    trend_sma_period = st.slider("SMA Period", 20, 200, 100)
-
-# Backtest parameters
-with st.sidebar.expander("Backtest Settings", expanded=False):
-    initial_capital = st.number_input("Initial Capital ($)", value=100000, step=10000)
-    commission = st.number_input("Commission (%)", value=0.1, step=0.05) / 100
-    slippage = st.number_input("Slippage (%)", value=0.05, step=0.01) / 100
-
-st.sidebar.markdown("---")
-
-# ============================================================
-# RUN BUTTON
-# ============================================================
-
-run_backtest = st.sidebar.button("🚀 Run Backtest", type="primary", use_container_width=True)
+# Sub-navigation for Models page
+if st.session_state.current_page == "Models":
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### Select Model:")
+    
+    for model_name in MODEL_INFO.keys():
+        if st.sidebar.button(f"📈 {model_name}", key=f"nav_{model_name}"):
+            st.session_state.current_model = model_name
 
 st.sidebar.markdown("---")
 st.sidebar.caption("Built with ❤️ by Quantitative Research Team")
 
 # ============================================================
-# MAIN PAGE - RESULTS
+# PAGE ROUTING
 # ============================================================
 
-if run_backtest:
+if st.session_state.current_page == "Home":
+    # HOME PAGE
+    st.title("📊 Ensemble Trading Research Lab")
+    st.markdown("""
+    Welcome to the Ensemble Trading Research Lab - an interactive platform for testing
+    and analyzing quantitative trading strategies.
+    """)
     
-    with st.spinner("Running ensemble backtest..."):
-        
-        # --------------------------------------------------------
-        # Step 1: Initialize selected strategies
-        # --------------------------------------------------------
-        
-        strategy_objects = []
-        
-        for strategy_name in selected_strategies:
-            strategy_type = available_strategies[strategy_name]
-            
-            if strategy_type == "mean_reversion":
-                strategy_objects.append(MeanReversionQP(
-                    name="MeanReversion",
-                    lookback_ma=mr_lookback_ma,
-                    lookback_vol=mr_lookback_vol,
-                    historical_vol_period=mr_hist_vol
-                ))
-            
-            elif strategy_type == "trend":
-                strategy_objects.append(SimpleTrend(
-                    name="TrendFollowing",
-                    sma_period=trend_sma_period
-                ))
-            
-            elif strategy_type == "random":
-                strategy_objects.append(RandomStrategy(
-                    name="Random"
-                ))
-        
-        # --------------------------------------------------------
-        # Step 2: Create Portfolio Manager
-        # --------------------------------------------------------
-        
-        config = PortfolioConfig(
-            top_n_assets=top_n_assets,
-            rebalance_frequency='daily',
-            equal_weight=True,
-            long_only=True
-        )
-        
-        portfolio_manager = PortfolioManager(
-            strategies=strategy_objects,
-            config=config
-        )
-        
-        # --------------------------------------------------------
-        # Step 3: Generate Ensemble Signals
-        # --------------------------------------------------------
-        
-        ensemble_signals = portfolio_manager.generate_ensemble_signals(market_data)
-        
-        # --------------------------------------------------------
-        # Step 4: Run Backtest
-        # --------------------------------------------------------
-        
-        backtest_engine = BacktestEngine(
-            initial_capital=initial_capital,
-            commission=commission,
-            slippage=slippage
-        )
-        
-        equity_curve = backtest_engine.run(market_data, ensemble_signals)
-        metrics = backtest_engine.get_performance_metrics()
-        
-    # --------------------------------------------------------
-    # DISPLAY RESULTS
-    # --------------------------------------------------------
+    st.markdown("---")
     
-    st.success("✅ Backtest completed successfully!")
-    
-    # --------------------------------------------------------
-    # Section 1: Performance Summary
-    # --------------------------------------------------------
-    
-    st.header("📈 Performance Summary")
-    
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2 = st.columns(2)
     
     with col1:
-        st.metric(
-            "Total Return",
-            metrics['Total Return'],
-            help="Cumulative return over the entire period"
+        st.subheader("🧠 Models")
+        st.markdown("""
+        Explore our suite of trading strategies:
+        - **Mean Reversion**: Capitalizes on price oscillations
+        - **Trend Following**: Rides momentum waves
+        - **Momentum**: Selects top performers
+        
+        Each model includes detailed documentation, assumptions, and tunable hyperparameters.
+        """)
+        
+    with col2:
+        st.subheader("🚀 Run Simulation")
+        st.markdown("""
+        Test your ensemble strategies:
+        - Select multiple models to combine
+        - Configure hyperparameters
+        - Set portfolio constraints
+        - Analyze performance metrics
+        - Export results for further analysis
+        """)
+    
+    st.markdown("---")
+    
+    st.subheader("📈 Quick Stats")
+    st.info(f"📁 **Active Data Source:** `{st.session_state.data_source}`")
+    
+    with st.spinner("Loading data statistics..."):
+        market_data = load_nasdaq_data(st.session_state.data_source)
+        
+        if market_data is not None:
+            num_tickers = len(market_data.index.get_level_values('ticker').unique())
+            date_range = market_data.index.get_level_values('date').unique()
+            start_date = date_range.min()
+            end_date = date_range.max()
+            
+            col_a, col_b, col_c, col_d = st.columns(4)
+            
+            with col_a:
+                st.metric("Total Records", f"{len(market_data):,}")
+            with col_b:
+                st.metric("Unique Tickers", num_tickers)
+            with col_c:
+                st.metric("Start Date", str(start_date.date()))
+            with col_d:
+                st.metric("End Date", str(end_date.date()))
+
+elif st.session_state.current_page == "Data":
+    # DATA CONFIGURATION PAGE
+    st.title("💾 Data Configuration")
+    st.markdown("Configure your data source and filtering options for simulations.")
+    st.info(f"📁 **Current Data Source:** `{st.session_state.data_source}`")
+    
+    st.markdown("---")
+    
+    # Data Source Selection
+    st.subheader("📁 Data Source")
+    
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        data_file = st.text_input(
+            "CSV Filename",
+            value=st.session_state.data_source,
+            help="Enter the filename of your CSV data file",
+            key="data_file_input"
         )
     
     with col2:
-        st.metric(
-            "Sharpe Ratio",
-            metrics['Sharpe Ratio'],
-            help="Risk-adjusted return (>1.0 is good, >2.0 is excellent)"
-        )
+        if st.button("📥 Load Data", type="primary", use_container_width=True):
+            st.session_state.data_source = data_file
+            # Clear cache to reload data
+            load_nasdaq_data.clear()
+            st.success(f"✅ Data source updated to: {data_file}")
+            st.rerun()
     
-    with col3:
-        st.metric(
-            "Max Drawdown",
-            metrics['Maximum Drawdown'],
-            delta=None,
-            delta_color="inverse",
-            help="Largest peak-to-trough decline"
-        )
+    st.markdown("---")
     
-    with col4:
-        st.metric(
-            "Win Rate",
-            metrics['Win Rate'],
-            help="Percentage of profitable trades"
-        )
+    # Data Preview
+    st.subheader("📊 Current Data Source")
     
-    # Additional metrics in expandable section
-    with st.expander("📊 Detailed Metrics", expanded=False):
-        col_a, col_b, col_c = st.columns(3)
+    with st.spinner("Loading data preview..."):
+        market_data = load_nasdaq_data(st.session_state.data_source)
+    
+    if market_data is not None:
+        st.success(f"✅ Successfully loaded: {st.session_state.data_source}")
+        
+        # Display metrics
+        num_tickers = len(market_data.index.get_level_values('ticker').unique())
+        date_range = market_data.index.get_level_values('date').unique()
+        start_date = date_range.min()
+        end_date = date_range.max()
+        
+        col_a, col_b, col_c, col_d = st.columns(4)
         
         with col_a:
-            st.metric("Annualized Return", metrics['Annualized Return'])
-            st.metric("Annualized Volatility", metrics['Annualized Volatility'])
-        
+            st.metric("Total Records", f"{len(market_data):,}")
         with col_b:
-            st.metric("Total Trades", metrics['Total Trades'])
-            st.metric("Avg Positions", f"{metrics['Avg Positions']:.1f}")
-        
+            st.metric("Unique Tickers", num_tickers)
         with col_c:
-            st.metric("Final Value", metrics['Final Value'])
-            st.metric("Initial Capital", f"${initial_capital:,.2f}")
-    
-    st.markdown("---")
-    
-    # --------------------------------------------------------
-    # Section 2: Equity Curve
-    # --------------------------------------------------------
-    
-    st.header("💰 Equity Curve")
-    
-    # Create interactive Plotly chart
-    fig_equity = go.Figure()
-    
-    fig_equity.add_trace(go.Scatter(
-        x=equity_curve.index,
-        y=equity_curve['portfolio_value'],
-        mode='lines',
-        name='Portfolio Value',
-        line=dict(color='#2E86AB', width=2),
-        fill='tonexty',
-        fillcolor='rgba(46, 134, 171, 0.1)'
-    ))
-    
-    # Add initial capital line
-    fig_equity.add_hline(
-        y=initial_capital,
-        line_dash="dash",
-        line_color="gray",
-        annotation_text="Initial Capital",
-        annotation_position="right"
-    )
-    
-    fig_equity.update_layout(
-        title="Portfolio Value Over Time",
-        xaxis_title="Date",
-        yaxis_title="Portfolio Value ($)",
-        hovermode='x unified',
-        height=500,
-        showlegend=True,
-        template='plotly_white'
-    )
-    
-    st.plotly_chart(fig_equity, use_container_width=True)
-    
-    # --------------------------------------------------------
-    # Section 3: Drawdown Chart
-    # --------------------------------------------------------
-    
-    with st.expander("📉 Drawdown Analysis", expanded=False):
+            st.metric("Start Date", str(start_date.date()))
+        with col_d:
+            st.metric("End Date", str(end_date.date()))
         
-        # Calculate drawdown
-        returns = equity_curve['portfolio_value'].pct_change()
-        cumulative = (1 + returns).cumprod()
-        running_max = cumulative.expanding().max()
-        drawdown = (cumulative - running_max) / running_max
+        st.markdown("---")
         
-        fig_dd = go.Figure()
+        # Date Range Filtering
+        st.subheader("📅 Date Range Filter")
         
-        fig_dd.add_trace(go.Scatter(
-            x=drawdown.index,
-            y=drawdown * 100,
-            mode='lines',
-            name='Drawdown',
-            line=dict(color='#A23B72', width=2),
-            fill='tozeroy',
-            fillcolor='rgba(162, 59, 114, 0.3)'
-        ))
-        
-        fig_dd.update_layout(
-            title="Portfolio Drawdown",
-            xaxis_title="Date",
-            yaxis_title="Drawdown (%)",
-            hovermode='x unified',
-            height=400,
-            template='plotly_white'
+        enable_filter = st.checkbox(
+            "Enable date range filtering for simulations",
+            value=st.session_state.date_filter_enabled,
+            help="When enabled, only data within the selected range will be used"
         )
         
-        st.plotly_chart(fig_dd, use_container_width=True)
-    
-    st.markdown("---")
-    
-    # --------------------------------------------------------
-    # Section 4: Strategy Correlation Heatmap
-    # --------------------------------------------------------
-    
-    st.header("🔗 Strategy Correlation Matrix")
-    
-    st.markdown("""
-    **Interpretation:**
-    - **Low correlation (near 0)**: Strategies are independent → Good diversification
-    - **High positive (near +1)**: Strategies are redundant → Consider removing one
-    - **High negative (near -1)**: Strategies hedge each other
-    """)
-    
-    if portfolio_manager.correlation_matrix is not None:
-        
-        # Clean up column names for display
-        corr_matrix = portfolio_manager.correlation_matrix.copy()
-        corr_matrix.columns = [col.replace('signal_', '') for col in corr_matrix.columns]
-        corr_matrix.index = [idx.replace('signal_', '') for idx in corr_matrix.index]
-        
-        # Create heatmap
-        fig_corr = px.imshow(
-            corr_matrix,
-            text_auto='.3f',
-            color_continuous_scale='RdBu_r',
-            color_continuous_midpoint=0,
-            aspect='auto',
-            labels=dict(color="Correlation")
-        )
-        
-        fig_corr.update_layout(
-            title="Strategy Signal Correlation",
-            height=400,
-            template='plotly_white'
-        )
-        
-        st.plotly_chart(fig_corr, use_container_width=True)
-        
-        # Correlation insights
-        avg_corr = corr_matrix.values[np.triu_indices_from(corr_matrix.values, k=1)].mean()
-        
-        if avg_corr < 0.3:
-            st.success(f"✅ Excellent diversification! Average correlation: {avg_corr:.3f}")
-        elif avg_corr < 0.6:
-            st.info(f"ℹ️ Moderate diversification. Average correlation: {avg_corr:.3f}")
+        if enable_filter:
+            col_date1, col_date2 = st.columns(2)
+            
+            with col_date1:
+                filter_start = st.date_input(
+                    "Start Date",
+                    value=start_date,
+                    min_value=start_date,
+                    max_value=end_date
+                )
+            
+            with col_date2:
+                filter_end = st.date_input(
+                    "End Date",
+                    value=end_date,
+                    min_value=start_date,
+                    max_value=end_date
+                )
+            
+            st.session_state.date_filter_enabled = True
+            st.session_state.date_filter_start = pd.Timestamp(filter_start)
+            st.session_state.date_filter_end = pd.Timestamp(filter_end)
+            
+            filtered_data = market_data.loc[
+                (market_data.index.get_level_values('date') >= pd.Timestamp(filter_start)) &
+                (market_data.index.get_level_values('date') <= pd.Timestamp(filter_end))
+            ]
+            
+            st.info(f"📊 Filtered: {len(filtered_data):,} records ({len(filtered_data) / len(market_data) * 100:.1f}% of total)")
         else:
-            st.warning(f"⚠️ High correlation detected. Average: {avg_corr:.3f}. Consider more diverse strategies.")
+            st.session_state.date_filter_enabled = False
+        
+        st.markdown("---")
+        
+        # Ticker Selection
+        st.subheader("🎯 Ticker Filter")
+        
+        all_tickers = sorted(market_data.index.get_level_values('ticker').unique())
+        
+        filter_type = st.radio(
+            "Filter type:",
+            ["Use All Tickers", "Select Specific Tickers", "Exclude Tickers"],
+            horizontal=True
+        )
+        
+        if filter_type == "Select Specific Tickers":
+            selected_tickers = st.multiselect(
+                "Select tickers to include:",
+                options=all_tickers,
+                default=all_tickers[:10] if len(all_tickers) > 10 else all_tickers,
+                help="Only selected tickers will be used"
+            )
+            st.session_state.ticker_filter = selected_tickers
+            st.session_state.ticker_filter_type = "include"
+            st.info(f"📊 Selected {len(selected_tickers)} tickers")
+        
+        elif filter_type == "Exclude Tickers":
+            excluded_tickers = st.multiselect(
+                "Select tickers to exclude:",
+                options=all_tickers,
+                help="These tickers will be excluded"
+            )
+            st.session_state.ticker_filter = excluded_tickers
+            st.session_state.ticker_filter_type = "exclude"
+            if excluded_tickers:
+                st.info(f"📊 Excluding {len(excluded_tickers)} tickers ({len(all_tickers) - len(excluded_tickers)} remaining)")
+        else:
+            st.session_state.ticker_filter = None
+            st.session_state.ticker_filter_type = None
+        
+        st.markdown("---")
+        
+        # Sample Data Preview
+        st.subheader("👀 Data Sample")
+        preview_rows = st.slider("Number of rows to preview", 5, 100, 20)
+        st.dataframe(market_data.head(preview_rows), use_container_width=True)
     
     else:
-        st.warning("⚠️ Correlation matrix not available. Need at least 2 strategies.")
-    
-    st.markdown("---")
-    
-    # --------------------------------------------------------
-    # Section 5: Top Holdings
-    # --------------------------------------------------------
-    
-    st.header("🏆 Top Holdings (Last Rebalance)")
-    
-    last_date = ensemble_signals.index.get_level_values('date').unique()[-1]
-    top_assets = portfolio_manager.get_top_assets(last_date, top_n=top_n_assets)
-    
-    if len(top_assets) > 0:
-        
-        # Format for display
-        display_df = top_assets.copy()
-        display_df['combined_score'] = display_df['combined_score'].round(3)
-        display_df['weight'] = (display_df['weight'] * 100).round(2).astype(str) + '%'
-        display_df['rank'] = display_df['rank'].astype(int)
-        
-        display_df = display_df.rename(columns={
-            'combined_score': 'Combined Score',
-            'rank': 'Rank',
-            'weight': 'Weight'
-        })
-        
-        st.dataframe(
-            display_df,
-            use_container_width=True,
-            height=300
-        )
-    
-    else:
-        st.warning("⚠️ No holdings data available.")
-    
-    st.markdown("---")
-    
-    # --------------------------------------------------------
-    # Section 6: Download Results
-    # --------------------------------------------------------
-    
-    st.header("💾 Export Results")
-    
-    col_dl1, col_dl2 = st.columns(2)
-    
-    with col_dl1:
-        # Export equity curve
-        equity_csv = equity_curve.to_csv()
-        st.download_button(
-            label="📥 Download Equity Curve",
-            data=equity_csv,
-            file_name=f"equity_curve_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv"
-        )
-    
-    with col_dl2:
-        # Export signals
-        signals_csv = ensemble_signals.to_csv()
-        st.download_button(
-            label="📥 Download Signals",
-            data=signals_csv,
-            file_name=f"ensemble_signals_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv"
-        )
+        st.error(f"❌ Failed to load data from: {st.session_state.data_source}")
+        st.info("💡 Please check that the file exists and is in the correct format.")
 
-else:
-    # --------------------------------------------------------
-    # WELCOME SCREEN (Before running backtest)
-    # --------------------------------------------------------
+elif st.session_state.current_page == "Models":
+    # MODELS PAGE
     
-    st.info("👈 Configure your ensemble in the sidebar and click **'Run Backtest'** to begin!")
-    
-    st.markdown("---")
-    
-    st.subheader("📚 Quick Start Guide")
-    
-    col_guide1, col_guide2 = st.columns(2)
-    
-    with col_guide1:
-        st.markdown("""
-        **1. Select Strategies**
-        - Choose 1 or more strategies from the sidebar
-        - Each strategy provides unique signals
-        - More diverse strategies = better ensemble
+    if st.session_state.current_model is None:
+        # Models Overview
+        st.title("🧠 Trading Models")
+        st.markdown("Select a model from the sidebar to view detailed information.")
         
-        **2. Configure Parameters**
-        - Adjust max positions (portfolio concentration)
-        - Fine-tune strategy-specific settings
-        - Set realistic transaction costs
-        """)
-    
-    with col_guide2:
-        st.markdown("""
-        **3. Run & Analyze**
-        - Click "Run Backtest" to execute
-        - Review performance metrics
-        - Check strategy correlation for diversification
-        - Export results for further analysis
+        st.markdown("---")
         
-        **4. Iterate & Optimize**
-        - Try different strategy combinations
-        - Adjust parameters to improve performance
-        - Compare results across multiple runs
-        """)
+        for model_name, info in MODEL_INFO.items():
+            with st.expander(f"📈 **{model_name}**", expanded=False):
+                st.markdown(f"**Description:** {info['short_desc']}")
+                st.markdown(f"**Best For:** {info['description'].split('**Best Use Cases:**')[1].split('**')[0].strip()}")
+                
+                if st.button(f"View Details →", key=f"details_{model_name}"):
+                    st.session_state.current_model = model_name
+                    st.rerun()
     
-    st.markdown("---")
-    
-    st.subheader("📊 Available Strategies")
-    
-    strategy_info = {
-        "Mean Reversion (QP)": {
-            "Description": "Buys undervalued assets with low Quality-Price Indicator",
-            "Best For": "Range-bound markets, contrarian opportunities",
-            "Key Parameter": "MA Lookback (controls mean reversion speed)"
-        },
-        "Trend Following": {
-            "Description": "Follows momentum by comparing price to moving average",
-            "Best For": "Trending markets, momentum capture",
-            "Key Parameter": "SMA Period (defines trend timeframe)"
-        },
-        "Random (Benchmark)": {
-            "Description": "Generates random signals for performance baseline",
-            "Best For": "Benchmarking strategy effectiveness",
-            "Key Parameter": "None (random seed for reproducibility)"
-        }
-    }
-    
-    for strat_name, info in strategy_info.items():
-        with st.expander(f"🔹 {strat_name}", expanded=False):
-            st.markdown(f"**Description:** {info['Description']}")
-            st.markdown(f"**Best For:** {info['Best For']}")
-            st.markdown(f"**Key Parameter:** {info['Key Parameter']}")
-    
-    st.markdown("---")
-    
-    # Data preview
-    st.subheader("👀 Data Preview")
-    
-    if market_data is not None and len(market_data) > 0:
+    else:
+        # Specific Model Details
+        model_name = st.session_state.current_model
+        model_info = MODEL_INFO[model_name]
         
-        # Show sample data
-        sample_size = min(100, len(market_data))
-        st.dataframe(
-            market_data.head(sample_size),
-            use_container_width=True,
-            height=300
+        if st.button("← Back to Models Overview"):
+            st.session_state.current_model = None
+            st.rerun()
+        
+        st.title(f"📈 {model_name}")
+        
+        st.markdown("---")
+        
+        # Description
+        st.subheader("📝 Description")
+        st.markdown(model_info['description'])
+        
+        st.markdown("---")
+        
+        # Assumptions
+        st.subheader("⚠️ Key Assumptions")
+        for assumption in model_info['assumptions']:
+            st.markdown(f"- {assumption}")
+        
+        st.markdown("---")
+        
+        # Hyperparameters
+        st.subheader("⚙️ Hyperparameters")
+        
+        for param_key, param_info in model_info['hyperparameters'].items():
+            with st.expander(f"**{param_info['name']}**", expanded=False):
+                st.markdown(f"**Description:** {param_info['description']}")
+                st.markdown(f"**Default Value:** {param_info['default']}")
+                st.markdown(f"**Typical Range:** {param_info['range'][0]} - {param_info['range'][1]}")
+                st.markdown(f"**Impact:** {param_info['impact']}")
+
+elif st.session_state.current_page == "Run Simulation":
+    # Import simulation page components
+    from run_simulation_page import render_simulation_page
+    render_simulation_page(MODEL_INFO, load_nasdaq_data)
+
+elif st.session_state.current_page == "Data Explorer":
+    # DATA EXPLORER PAGE
+    st.title("📊 Data Explorer")
+    st.info(f"📁 **Active Data Source:** `{st.session_state.data_source}`")
+    
+    with st.spinner("Loading market data..."):
+        market_data = load_nasdaq_data(st.session_state.data_source)
+    
+    if market_data is not None:
+        st.success("✅ Data loaded successfully")
+        
+        # Data info
+        num_tickers = len(market_data.index.get_level_values('ticker').unique())
+        date_range = market_data.index.get_level_values('date').unique()
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total Records", f"{len(market_data):,}")
+        with col2:
+            st.metric("Unique Tickers", num_tickers)
+        with col3:
+            st.metric("Date Range", f"{str(date_range.min().date())} to {str(date_range.max().date())}")
+        
+        st.markdown("---")
+        
+        # Data preview
+        st.subheader("📋 Data Preview")
+        sample_size = st.slider("Number of rows to display", 10, 1000, 100)
+        st.dataframe(market_data.head(sample_size), width='stretch', height=400)
+        
+        # Export
+        st.markdown("---")
+        st.subheader("💾 Export Data")
+        csv = market_data.head(10000).to_csv()
+        st.download_button(
+            label="📥 Download Sample (10,000 rows)",
+            data=csv,
+            file_name="market_data_sample.csv",
+            mime="text/csv"
         )
-        
-        # Basic statistics
-        st.caption(f"Showing first {sample_size} rows of {len(market_data):,} total records")
