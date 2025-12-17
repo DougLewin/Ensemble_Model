@@ -7,6 +7,54 @@ Modify these settings to customize behavior without changing code.
 
 from dataclasses import dataclass
 from typing import List, Optional
+import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
+
+
+def get_config_value(key: str, default: str = None, streamlit_section: str = None) -> Optional[str]:
+    """
+    Get configuration value from Streamlit secrets or environment variables.
+    Prioritizes Streamlit secrets when available (for cloud deployment).
+    
+    Args:
+        key: Environment variable key
+        default: Default value if not found
+        streamlit_section: Section name in Streamlit secrets (e.g., 'aws', 'data')
+    
+    Returns:
+        Configuration value or default
+    """
+    # Try Streamlit secrets first (for cloud deployment)
+    try:
+        import streamlit as st
+        if streamlit_section and key in st.secrets.get(streamlit_section, {}):
+            return st.secrets[streamlit_section][key]
+    except (ImportError, FileNotFoundError, KeyError):
+        pass
+    
+    # Fall back to environment variables (for local development)
+    return os.getenv(key, default)
+
+
+@dataclass
+class AWSConfig:
+    """AWS S3 configuration for data loading."""
+    
+    def __init__(self):
+        """Initialize AWS config from Streamlit secrets or environment variables."""
+        use_s3_str = get_config_value('USE_S3', 'true', 'data')
+        self.use_s3 = use_s3_str.lower() in ('true', '1', 'yes')
+        
+        self.bucket_name = get_config_value('AWS_S3_BUCKET_NAME', 'my-nasdaq-data-bucket', 'aws')
+        self.s3_key = get_config_value('AWS_S3_KEY', 'NASDAQ.csv', 'aws')
+        self.aws_access_key_id = get_config_value('AWS_ACCESS_KEY_ID', None, 'aws')
+        self.aws_secret_access_key = get_config_value('AWS_SECRET_ACCESS_KEY', None, 'aws')
+        self.region_name = get_config_value('AWS_REGION', 'us-east-1', 'aws')
+        self.use_cache = True  # Cache downloaded files locally
+        self.local_fallback = get_config_value('LOCAL_FALLBACK', 'NASDAQ.csv', 'data')
 
 
 @dataclass
@@ -62,6 +110,7 @@ class BacktestConfig:
 @dataclass
 class SystemConfig:
     """Master configuration."""
+    aws: AWSConfig = AWSConfig()
     data: DataConfig = DataConfig()
     strategies: StrategyConfig = StrategyConfig()
     ensemble: EnsembleConfig = EnsembleConfig()

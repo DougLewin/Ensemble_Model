@@ -6,6 +6,19 @@ NASDAQ*.csv
 *.h5
 *.hdf5
 
+# Environment variables and secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Streamlit secrets (local only)
+.streamlit/secrets.toml
+
+# AWS
+.aws/
+
 # Python
 __pycache__/
 *.py[cod]

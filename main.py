@@ -10,7 +10,12 @@ Date: December 16, 2025
 import pandas as pd
 import numpy as np
 import warnings
+import os
+from dotenv import load_dotenv
 warnings.filterwarnings('ignore')
+
+# Load environment variables
+load_dotenv()
 
 # Import our modular components
 from strategy_base import Strategy
@@ -18,14 +23,20 @@ from mean_reversion_strategy import MeanReversionQP
 from trend_strategy import SimpleTrend
 from portfolio_manager import PortfolioManager, PortfolioConfig
 from backtest_engine import BacktestEngine
+from s3_data_loader import S3DataLoader
+from config import AWSConfig
 
 
-def load_live_market_data(filepath: str = "NASDAQ_HISTORY_2.csv") -> pd.DataFrame:
+def load_live_market_data(
+    filepath: str = "NASDAQ_HISTORY_2.csv",
+    use_s3: bool = None
+) -> pd.DataFrame:
     """
-    Load live market data from CSV file.
+    Load live market data from S3 or local CSV file.
     
     Args:
-        filepath: Path to the CSV file
+        filepath: Path to the CSV file (used for local files or as fallback)
+        use_s3: Whether to use S3 (if None, uses config setting)
     
     Returns:
         DataFrame with MultiIndex (date, ticker) and OHLCV columns
@@ -33,31 +44,87 @@ def load_live_market_data(filepath: str = "NASDAQ_HISTORY_2.csv") -> pd.DataFram
     print(f"\n{'='*60}")
     print("DATA LOADING: Reading Live Market Data")
     print(f"{'='*60}")
-    print(f"Source: {filepath}")
+    
+    # Load AWS configuration
+    aws_config = AWSConfig()
+    
+    # Determine data source
+    should_use_s3 = use_s3 if use_s3 is not None else aws_config.use_s3
     
     try:
-        # Load CSV
-        df = pd.read_csv(filepath)
+        if should_use_s3:
+            # Load from S3
+            print(f"📡 Loading from S3: {aws_config.bucket_name}/{aws_config.s3_key}")
+            
+            loader = S3DataLoader(
+                bucket_name=aws_config.bucket_name,
+                aws_access_key_id=aws_config.aws_access_key_id,
+                aws_secret_access_key=aws_config.aws_secret_access_key,
+                region_name=aws_config.region_name
+            )
+            
+            df = loader.load_nasdaq_data(
+                s3_key=aws_config.s3_key,
+                use_cache=aws_config.use_cache
+            )
+            
+            return df
+            
+        else:
+            # Load from local file
+            print(f"📁 Loading from local file: {filepath}")
+            
+            # Load CSV
+            df = pd.read_csv(filepath)
+            
+            # Standardize column names (lowercase)
+            df.columns = df.columns.str.lower()
+            
+            # Rename columns to match expected format
+            column_mapping = {
+                'code': 'ticker',
+                'date': 'date',
+                'open': 'open',
+                'high': 'high',
+                'low': 'low',
+                'close': 'close',
+                'volume': 'volume'
+            }
+            df = df.rename(columns=column_mapping)
+            
+            # Convert date to datetime (YYYY-MM-DD format)
+            df['date'] = pd.to_datetime(df['date'])
+            
+            # Keep only required columns
+            required_cols = ['date', 'ticker', 'open', 'high', 'low', 'close', 'volume']
+            df = df[required_cols]
+            
+            # Set MultiIndex
+            df = df.set_index(['date', 'ticker']).sort_index()
+            
+            # Remove any duplicates
+            df = df[~df.index.duplicated(keep='first')]
+            
+            print(f"\n📊 Data Summary:")
+            print(f"   Date Range: {df.index.get_level_values('date').min()} to {df.index.get_level_values('date').max()}")
+            print(f"   Unique Tickers: {df.index.get_level_values('ticker').nunique()}")
+            print(f"   Total Records: {len(df):,}")
+            
+            return df
+    
+    except Exception as e:
+        print(f"\n❌ Error loading data: {str(e)}")
         
-        # Standardize column names (lowercase)
-        df.columns = df.columns.str.lower()
-        
-        # Rename columns to match expected format
-        column_mapping = {
-            'code': 'ticker',
-            'date': 'date',
-            'open': 'open',
-            'high': 'high',
-            'low': 'low',
-            'close': 'close',
-            'volume': 'volume'
-        }
-        df = df.rename(columns=column_mapping)
-        
-        # Convert date to datetime (YYYY-MM-DD format)
-        df['date'] = pd.to_datetime(df['date'])
-        
-        # Keep only required columns
+        # Try fallback if S3 failed
+        if should_use_s3 and aws_config.local_fallback:
+            print(f"\n⚠️ S3 load failed. Attempting local fallback: {aws_config.local_fallback}")
+            try:
+                return load_live_market_data(aws_config.local_fallback, use_s3=False)
+            except Exception as fallback_error:
+                print(f"❌ Fallback also failed: {str(fallback_error)}")
+                raise
+        else:
+            raise
         required_cols = ['date', 'ticker', 'open', 'high', 'low', 'close', 'volume']
         df = df[required_cols]
         

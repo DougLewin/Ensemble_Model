@@ -13,13 +13,19 @@ import numpy as np
 import warnings
 import os
 import glob
+from dotenv import load_dotenv
 warnings.filterwarnings('ignore')
+
+# Load environment variables
+load_dotenv()
 
 # Import our trading engine components
 from strategy_base import Strategy
 from mean_reversion_strategy import MeanReversionQP
 from trend_strategy import SimpleTrend
 from momentum_strategy import MomentumStrategy
+from s3_data_loader import S3DataLoader
+from config import AWSConfig
 
 # ============================================================
 # PAGE CONFIGURATION
@@ -70,57 +76,109 @@ def get_available_csv_files():
 # ============================================================
 
 @st.cache_data
-def load_nasdaq_data(filepath: str = "NASDAQ.csv") -> pd.DataFrame:
+def load_nasdaq_data(
+    filepath: str = "NASDAQ.csv",
+    use_s3: bool = None,
+    force_local: bool = False
+) -> pd.DataFrame:
     """
     Load NASDAQ data with caching for performance.
+    Supports both S3 and local file sources.
     
     Args:
-        filepath: Path to the CSV file
+        filepath: Path to the CSV file (used for local files or as S3 key)
+        use_s3: Whether to use S3 (if None, uses config setting)
+        force_local: Force loading from local file even if S3 is configured
         
     Returns:
         DataFrame with MultiIndex (date, ticker) and OHLCV columns
     """
+    # Load AWS configuration
+    aws_config = AWSConfig()
+    
+    # Determine data source
+    should_use_s3 = not force_local and (use_s3 if use_s3 is not None else aws_config.use_s3)
+    
     try:
-        # Load CSV
-        df = pd.read_csv(filepath)
-        
-        # Standardize column names (lowercase)
-        df.columns = df.columns.str.lower()
-        
-        # Rename columns to match expected format
-        column_mapping = {
-            'code': 'ticker',
-            'date': 'date',
-            'open': 'open',
-            'high': 'high',
-            'low': 'low',
-            'close': 'close',
-            'volume': 'volume'
-        }
-        df = df.rename(columns=column_mapping)
-        
-        # Convert date to datetime (YYYY-MM-DD format)
-        df['date'] = pd.to_datetime(df['date'])
-        
-        # Keep only required columns
-        required_cols = ['date', 'ticker', 'open', 'high', 'low', 'close', 'volume']
-        df = df[required_cols]
-        
-        # Set MultiIndex
-        df = df.set_index(['date', 'ticker'])
-        
-        # Sort index
-        df = df.sort_index()
-        
-        return df
+        if should_use_s3:
+            # Load from S3
+            st.info(f"📡 Loading data from S3: {aws_config.bucket_name}/{aws_config.s3_key}")
+            
+            loader = S3DataLoader(
+                bucket_name=aws_config.bucket_name,
+                aws_access_key_id=aws_config.aws_access_key_id,
+                aws_secret_access_key=aws_config.aws_secret_access_key,
+                region_name=aws_config.region_name
+            )
+            
+            df = loader.load_nasdaq_data(
+                s3_key=aws_config.s3_key,
+                use_cache=aws_config.use_cache
+            )
+            
+            st.success(f"✅ Data loaded from S3: {len(df):,} rows")
+            return df
+            
+        else:
+            # Load from local file
+            st.info(f"📁 Loading data from local file: {filepath}")
+            
+            # Load CSV
+            df = pd.read_csv(filepath)
+            
+            # Standardize column names (lowercase)
+            df.columns = df.columns.str.lower()
+            
+            # Rename columns to match expected format
+            column_mapping = {
+                'code': 'ticker',
+                'date': 'date',
+                'open': 'open',
+                'high': 'high',
+                'low': 'low',
+                'close': 'close',
+                'volume': 'volume'
+            }
+            df = df.rename(columns=column_mapping)
+            
+            # Convert date to datetime (YYYY-MM-DD format)
+            df['date'] = pd.to_datetime(df['date'])
+            
+            # Keep only required columns
+            required_cols = ['date', 'ticker', 'open', 'high', 'low', 'close', 'volume']
+            df = df[required_cols]
+            
+            # Set MultiIndex
+            df = df.set_index(['date', 'ticker'])
+            
+            # Sort index
+            df = df.sort_index()
+            
+            st.success(f"✅ Data loaded from local file: {len(df):,} rows")
+            return df
         
     except FileNotFoundError:
         st.error(f"❌ File not found: {filepath}")
-        st.info("📁 Please ensure {filepath} is in the current directory.")
+        st.info(f"📁 Please ensure {filepath} is in the current directory.")
+        
+        # Try fallback if S3 failed
+        if should_use_s3 and aws_config.local_fallback:
+            st.warning(f"⚠️ Attempting to load from local fallback: {aws_config.local_fallback}")
+            return load_nasdaq_data(aws_config.local_fallback, use_s3=False)
+        
         return None
     
     except Exception as e:
         st.error(f"❌ Error loading data: {str(e)}")
+        
+        # Try fallback if S3 failed
+        if should_use_s3 and aws_config.local_fallback:
+            st.warning(f"⚠️ S3 load failed. Attempting local fallback: {aws_config.local_fallback}")
+            try:
+                return load_nasdaq_data(aws_config.local_fallback, use_s3=False, force_local=True)
+            except:
+                pass
+        
         return None
 
 # ============================================================
