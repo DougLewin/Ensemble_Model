@@ -57,14 +57,16 @@ class S3DataLoader:
     def load_csv_from_s3(
         self,
         s3_key: str,
-        use_cache: bool = True
+        use_cache: bool = True,
+        cache_ttl_hours: int = 24
     ) -> pd.DataFrame:
         """
-        Load CSV file from S3 bucket.
+        Load CSV file from S3 bucket with smart local caching.
         
         Args:
             s3_key: S3 object key (path to file in bucket)
-            use_cache: Whether to cache the downloaded file locally
+            use_cache: Whether to use local cache file if available
+            cache_ttl_hours: Cache time-to-live in hours (default: 24)
             
         Returns:
             DataFrame with the loaded data
@@ -72,6 +74,26 @@ class S3DataLoader:
         Raises:
             Exception: If file cannot be loaded from S3
         """
+        cache_filename = os.path.basename(s3_key)
+        
+        # Check if local cache exists and is recent
+        if use_cache and os.path.exists(cache_filename):
+            cache_age_seconds = os.path.getmtime(cache_filename)
+            cache_age_hours = (pd.Timestamp.now().timestamp() - cache_age_seconds) / 3600
+            
+            if cache_age_hours < cache_ttl_hours:
+                print(f"\n{'='*60}")
+                print("LOADING FROM LOCAL CACHE")
+                print(f"{'='*60}")
+                print(f"Cache file: {cache_filename}")
+                print(f"Cache age: {cache_age_hours:.1f} hours (TTL: {cache_ttl_hours}h)")
+                
+                df = pd.read_csv(cache_filename)
+                print(f"✅ Loaded {len(df):,} rows from cache")
+                return df
+            else:
+                print(f"\n⚠️ Cache expired ({cache_age_hours:.1f}h > {cache_ttl_hours}h), downloading fresh data...")
+        
         try:
             print(f"\n{'='*60}")
             print("S3 DATA LOADING")
@@ -90,12 +112,11 @@ class S3DataLoader:
             csv_content = response['Body'].read().decode('utf-8')
             df = pd.read_csv(StringIO(csv_content))
             
-            print(f"✅ Successfully loaded {len(df):,} rows")
+            print(f"✅ Successfully loaded {len(df):,} rows from S3")
             print(f"Columns: {list(df.columns)}")
             
-            # Optionally cache locally
+            # Save to local cache
             if use_cache:
-                cache_filename = os.path.basename(s3_key)
                 df.to_csv(cache_filename, index=False)
                 print(f"📦 Cached locally as: {cache_filename}")
             
@@ -108,27 +129,32 @@ class S3DataLoader:
     def load_nasdaq_data(
         self,
         s3_key: str,
-        use_cache: bool = True
+        use_cache: bool = True,
+        cache_ttl_hours: int = 24
     ) -> pd.DataFrame:
         """
         Load NASDAQ data from S3 and format for trading system.
         
         Args:
             s3_key: S3 object key (path to NASDAQ CSV in bucket)
-            use_cache: Whether to cache the downloaded file locally
+            use_cache: Whether to use local cache file if available
+            cache_ttl_hours: Cache time-to-live in hours (default: 24)
             
         Returns:
             DataFrame with MultiIndex (date, ticker) and OHLCV columns
         """
-        # Load raw data from S3
-        df = self.load_csv_from_s3(s3_key, use_cache=use_cache)
+        # Load raw data from S3 (or cache)
+        df = self.load_csv_from_s3(s3_key, use_cache=use_cache, cache_ttl_hours=cache_ttl_hours)
         
         # Standardize column names (lowercase)
         df.columns = df.columns.str.lower()
         
         # Rename columns to match expected format
+        # Handle various column name formats: 'code', 'aokcode', etc.
         column_mapping = {
             'code': 'ticker',
+            'aokcode': 'ticker',  # Handle 'aokCODE' after lowercase
+            'ticker': 'ticker',
             'date': 'date',
             'open': 'open',
             'high': 'high',
@@ -144,6 +170,12 @@ class S3DataLoader:
         # Keep only required columns
         required_cols = ['date', 'ticker', 'open', 'high', 'low', 'close', 'volume']
         df = df[required_cols]
+        
+        # Remove rows with missing/NaN ticker values
+        df = df.dropna(subset=['ticker'])
+        
+        # Ensure ticker is string type
+        df['ticker'] = df['ticker'].astype(str)
         
         # Set MultiIndex
         df = df.set_index(['date', 'ticker']).sort_index()

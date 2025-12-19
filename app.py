@@ -75,15 +75,15 @@ def get_available_csv_files():
 # DATA LOADING (WITH CACHING)
 # ============================================================
 
-@st.cache_data
+@st.cache_data(ttl=3600, show_spinner="Loading market data...")
 def load_nasdaq_data(
     filepath: str = "NASDAQ.csv",
     use_s3: bool = None,
     force_local: bool = False
 ) -> pd.DataFrame:
     """
-    Load NASDAQ data with caching for performance.
-    Supports both S3 and local file sources.
+    Load NASDAQ data with aggressive caching for performance.
+    Data is cached for 1 hour to avoid repeated S3 downloads.
     
     Args:
         filepath: Path to the CSV file (used for local files or as S3 key)
@@ -101,9 +101,7 @@ def load_nasdaq_data(
     
     try:
         if should_use_s3:
-            # Load from S3
-            st.info(f"📡 Loading data from S3: {aws_config.bucket_name}/{aws_config.s3_key}")
-            
+            # Load from S3 (with smart caching)
             loader = S3DataLoader(
                 bucket_name=aws_config.bucket_name,
                 aws_access_key_id=aws_config.aws_access_key_id,
@@ -113,25 +111,25 @@ def load_nasdaq_data(
             
             df = loader.load_nasdaq_data(
                 s3_key=aws_config.s3_key,
-                use_cache=aws_config.use_cache
+                use_cache=True,
+                cache_ttl_hours=24  # Cache for 24 hours
             )
             
-            st.success(f"✅ Data loaded from S3: {len(df):,} rows")
             return df
             
         else:
             # Load from local file
-            st.info(f"📁 Loading data from local file: {filepath}")
-            
-            # Load CSV
             df = pd.read_csv(filepath)
             
             # Standardize column names (lowercase)
             df.columns = df.columns.str.lower()
             
             # Rename columns to match expected format
+            # Handle various column name formats: 'code', 'aokcode', etc.
             column_mapping = {
                 'code': 'ticker',
+                'aokcode': 'ticker',  # Handle 'aokCODE' after lowercase
+                'ticker': 'ticker',
                 'date': 'date',
                 'open': 'open',
                 'high': 'high',
@@ -148,13 +146,18 @@ def load_nasdaq_data(
             required_cols = ['date', 'ticker', 'open', 'high', 'low', 'close', 'volume']
             df = df[required_cols]
             
+            # Remove rows with missing/NaN ticker values
+            df = df.dropna(subset=['ticker'])
+            
+            # Ensure ticker is string type
+            df['ticker'] = df['ticker'].astype(str)
+            
             # Set MultiIndex
             df = df.set_index(['date', 'ticker'])
             
             # Sort index
             df = df.sort_index()
             
-            st.success(f"✅ Data loaded from local file: {len(df):,} rows")
             return df
         
     except FileNotFoundError:
@@ -479,7 +482,17 @@ elif st.session_state.current_page == "Data":
         market_data = load_nasdaq_data(st.session_state.data_source)
     
     if market_data is not None:
-        st.success(f"✅ Successfully loaded: {st.session_state.data_source}")
+        # Check if data was loaded from cache
+        aws_config = AWSConfig()
+        cache_file = "NASDAQ.csv"  # The local cache file name
+        data_source_info = "🌐 S3" if aws_config.use_s3 else "💾 Local"
+        
+        if aws_config.use_s3 and os.path.exists(cache_file):
+            cache_age_hours = (pd.Timestamp.now().timestamp() - os.path.getmtime(cache_file)) / 3600
+            if cache_age_hours < 24:
+                data_source_info = f"⚡ Cached ({cache_age_hours:.1f}h old)"
+        
+        st.success(f"✅ Successfully loaded from {data_source_info}: {st.session_state.data_source}")
         
         # Display metrics
         num_tickers = len(market_data.index.get_level_values('ticker').unique())
@@ -487,7 +500,7 @@ elif st.session_state.current_page == "Data":
         start_date = date_range.min()
         end_date = date_range.max()
         
-        col_a, col_b, col_c, col_d = st.columns(4)
+        col_a, col_b, col_c, col_d, col_e = st.columns([1, 1, 1, 1, 1])
         
         with col_a:
             st.metric("Total Records", f"{len(market_data):,}")
@@ -497,6 +510,14 @@ elif st.session_state.current_page == "Data":
             st.metric("Start Date", str(start_date.date()))
         with col_d:
             st.metric("End Date", str(end_date.date()))
+        with col_e:
+            if st.button("🔄 Refresh Data", help="Clear cache and reload from S3", use_container_width=True):
+                # Delete local cache file
+                if os.path.exists(cache_file):
+                    os.remove(cache_file)
+                # Clear Streamlit cache
+                load_nasdaq_data.clear()
+                st.rerun()
         
         st.markdown("---")
         
@@ -546,7 +567,9 @@ elif st.session_state.current_page == "Data":
         # Ticker Selection
         st.subheader("🎯 Ticker Filter")
         
-        all_tickers = sorted(market_data.index.get_level_values('ticker').unique())
+        # Get unique tickers and ensure they're strings, filter out NaN
+        tickers = market_data.index.get_level_values('ticker').unique()
+        all_tickers = sorted([str(t) for t in tickers if pd.notna(t)])
         
         filter_type = st.radio(
             "Filter type:",
