@@ -130,8 +130,11 @@ def load_nasdaq_data(
             df.columns = df.columns.str.lower()
             
             # Rename columns to match expected format
+            # Handle various column name formats: 'code', 'aokcode', etc.
             column_mapping = {
                 'code': 'ticker',
+                'aokcode': 'ticker',  # Handle 'aokCODE' after lowercase
+                'ticker': 'ticker',
                 'date': 'date',
                 'open': 'open',
                 'high': 'high',
@@ -160,25 +163,12 @@ def load_nasdaq_data(
     except FileNotFoundError:
         st.error(f"❌ File not found: {filepath}")
         st.info(f"📁 Please ensure {filepath} is in the current directory.")
-        
-        # Try fallback if S3 failed
-        if should_use_s3 and aws_config.local_fallback:
-            st.warning(f"⚠️ Attempting to load from local fallback: {aws_config.local_fallback}")
-            return load_nasdaq_data(aws_config.local_fallback, use_s3=False)
-        
         return None
     
     except Exception as e:
-        st.error(f"❌ Error loading data: {str(e)}")
-        
-        # Try fallback if S3 failed
-        if should_use_s3 and aws_config.local_fallback:
-            st.warning(f"⚠️ S3 load failed. Attempting local fallback: {aws_config.local_fallback}")
-            try:
-                return load_nasdaq_data(aws_config.local_fallback, use_s3=False, force_local=True)
-            except:
-                pass
-        
+        st.error(f"❌ Error loading data from S3: {str(e)}")
+        st.info("💡 Check your AWS credentials in .env file")
+        st.info("💡 Run test_s3_connection.py to debug S3 connection")
         return None
 
 # ============================================================
