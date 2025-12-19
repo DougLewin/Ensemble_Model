@@ -127,8 +127,11 @@ class S3DataLoader:
         df.columns = df.columns.str.lower()
         
         # Rename columns to match expected format
+        # Handle various column name formats: 'code', 'aokcode', etc.
         column_mapping = {
             'code': 'ticker',
+            'aokcode': 'ticker',  # Handle 'aokCODE' after lowercase
+            'ticker': 'ticker',
             'date': 'date',
             'open': 'open',
             'high': 'high',
