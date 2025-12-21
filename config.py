@@ -5,7 +5,7 @@ Centralized configuration for the Ensemble Trading System.
 Modify these settings to customize behavior without changing code.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional
 import os
 from dotenv import load_dotenv
@@ -110,11 +110,11 @@ class BacktestConfig:
 @dataclass
 class SystemConfig:
     """Master configuration."""
-    aws: AWSConfig = AWSConfig()
-    data: DataConfig = DataConfig()
-    strategies: StrategyConfig = StrategyConfig()
-    ensemble: EnsembleConfig = EnsembleConfig()
-    backtest: BacktestConfig = BacktestConfig()
+    aws: AWSConfig = field(default_factory=AWSConfig)
+    data: DataConfig = field(default_factory=DataConfig)
+    strategies: StrategyConfig = field(default_factory=StrategyConfig)
+    ensemble: EnsembleConfig = field(default_factory=EnsembleConfig)
+    backtest: BacktestConfig = field(default_factory=BacktestConfig)
     
     # Reporting
     verbose: bool = True
