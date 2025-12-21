@@ -22,7 +22,7 @@ def get_config_value(key: str, default: str = None, streamlit_section: str = Non
     Args:
         key: Environment variable key
         default: Default value if not found
-        streamlit_section: Section name in Streamlit secrets (e.g., 'aws', 'data')
+        streamlit_section: Section name in Streamlit secrets (e.g., 'AWS', 'data')
     
     Returns:
         Configuration value or default
@@ -30,9 +30,23 @@ def get_config_value(key: str, default: str = None, streamlit_section: str = Non
     # Try Streamlit secrets first (for cloud deployment)
     try:
         import streamlit as st
-        if streamlit_section and key in st.secrets.get(streamlit_section, {}):
-            return st.secrets[streamlit_section][key]
-    except (ImportError, FileNotFoundError, KeyError):
+        if hasattr(st, 'secrets'):
+            # Try to access the secret with section
+            if streamlit_section:
+                try:
+                    section = st.secrets[streamlit_section]
+                    if key in section:
+                        return section[key]
+                except (KeyError, AttributeError):
+                    pass
+            
+            # Try to access the secret directly (without section)
+            try:
+                if key in st.secrets:
+                    return st.secrets[key]
+            except (KeyError, AttributeError):
+                pass
+    except (ImportError, FileNotFoundError, AttributeError):
         pass
     
     # Fall back to environment variables (for local development)
@@ -46,13 +60,30 @@ class AWSConfig:
     def __init__(self):
         """Initialize AWS config from Streamlit secrets or environment variables."""
         use_s3_str = get_config_value('USE_S3', 'true', 'data')
-        self.use_s3 = use_s3_str.lower() in ('true', '1', 'yes')
+        self.use_s3 = use_s3_str.lower() in ('true', '1', 'yes') if use_s3_str else True
         
-        self.bucket_name = get_config_value('AWS_S3_BUCKET_NAME', 'my-nasdaq-data-bucket', 'aws')
-        self.s3_key = get_config_value('AWS_S3_KEY', 'NASDAQ.csv', 'aws')
-        self.aws_access_key_id = get_config_value('AWS_ACCESS_KEY_ID', None, 'aws')
-        self.aws_secret_access_key = get_config_value('AWS_SECRET_ACCESS_KEY', None, 'aws')
-        self.region_name = get_config_value('AWS_REGION', 'us-east-1', 'aws')
+        # Try both naming conventions for compatibility
+        self.bucket_name = (
+            get_config_value('S3_BUCKET_NAME', None, 'AWS') or 
+            get_config_value('AWS_S3_BUCKET_NAME', 'nasdaq-history', 'AWS') or
+            'nasdaq-history'
+        )
+        
+        self.s3_key = (
+            get_config_value('S3_FILE_KEY', None, 'AWS') or
+            get_config_value('AWS_S3_KEY', 'NASDAQ.csv', 'AWS') or
+            'NASDAQ.csv'
+        )
+        
+        self.aws_access_key_id = get_config_value('AWS_ACCESS_KEY_ID', None, 'AWS')
+        self.aws_secret_access_key = get_config_value('AWS_SECRET_ACCESS_KEY', None, 'AWS')
+        
+        self.region_name = (
+            get_config_value('AWS_DEFAULT_REGION', None, 'AWS') or
+            get_config_value('AWS_REGION', 'us-east-1', 'AWS') or
+            'us-east-1'
+        )
+        
         self.use_cache = True  # Cache downloaded files locally
         self.local_fallback = get_config_value('LOCAL_FALLBACK', 'NASDAQ.csv', 'data')
 
